@@ -1,20 +1,25 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-var jwtSecret = []byte("s0per@secret@k3y")
-
 type User struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	ID       uint
+	Username string
+	Password string
 }
+
+var jwtSecret = []byte("s0per@secret@k3y")
+var db *gorm.DB
 
 var users = map[string]string{}
 
@@ -49,6 +54,14 @@ func authMiddleware() gin.HandlerFunc {
 	}
 
 }
+func initDB() {
+	var err error
+	db, err = gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+	db.AutoMigrate(&User{})
+}
 
 func register(c *gin.Context) {
 	var newUser User
@@ -56,7 +69,12 @@ func register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
-	users[newUser.Username] = newUser.Password
+	var existingUser User
+	if err := db.Where("username = ?", newUser.Username).First(&existingUser).Error; err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
+		return
+	}
+	db.Create(&newUser)
 	c.JSON(http.StatusOK, gin.H{"message": "Registration successful"})
 }
 
@@ -66,24 +84,28 @@ func login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
-	if password, ok := users[loginUser.Username]; ok && password == loginUser.Password {
-		expirationTime := time.Now().Add(5 * time.Minute)
-		claims := &Claims{
-			Username: loginUser.Username,
-			StandardClaims: jwt.StandardClaims{
-				ExpiresAt: expirationTime.Unix(),
-			},
-		}
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-		tokenString, err := token.SignedString(jwtSecret)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate token"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"token": tokenString})
-	} else {
+	var user User
+	if err := db.Where("username = ? AND password = ?", loginUser.Username, loginUser.Password).First(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
 	}
+
+	expirationTime := time.Now().Add(5 * time.Minute)
+	claims := &Claims{
+		Username: user.Username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: expirationTime.Unix(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": tokenString})
 
 }
 
@@ -97,6 +119,8 @@ func profile(c *gin.Context) {
 
 func main() {
 	router := gin.Default()
+
+	initDB()
 
 	router.POST("/register", register)
 	router.POST("/login", login)
