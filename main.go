@@ -8,6 +8,7 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -20,8 +21,6 @@ type User struct {
 
 var jwtSecret = []byte("s0per@secret@k3y")
 var db *gorm.DB
-
-var users = map[string]string{}
 
 type Claims struct {
 	Username string `json:"username"`
@@ -63,6 +62,16 @@ func initDB() {
 	db.AutoMigrate(&User{})
 }
 
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
+	return string(bytes), err
+}
+
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
 func register(c *gin.Context) {
 	var newUser User
 	if err := c.ShouldBindJSON(&newUser); err != nil {
@@ -74,6 +83,14 @@ func register(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
 		return
 	}
+	hashedPassword, err := hashPassword(newUser.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	newUser.Password = hashedPassword
+
 	db.Create(&newUser)
 	c.JSON(http.StatusOK, gin.H{"message": "Registration successful"})
 }
@@ -85,7 +102,12 @@ func login(c *gin.Context) {
 		return
 	}
 	var user User
-	if err := db.Where("username = ? AND password = ?", loginUser.Username, loginUser.Password).First(&user).Error; err != nil {
+	if err := db.Where("username = ?", loginUser.Username).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
+
+	if !checkPasswordHash(loginUser.Password, user.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
